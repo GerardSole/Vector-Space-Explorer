@@ -48,6 +48,27 @@ html, body {
 /* ================= LEFT PANEL ================= */
 
 .db-panel {
+  /* tipografía del panel izquierdo: Outfit reemplaza a Inter/JetBrains
+     Mono solo dentro de este árbol (el resto de la app — tooltip,
+     onboarding, etc. — sigue usando las fuentes globales de :root) */
+  --font-ui: "Outfit", system-ui, sans-serif;
+  --font-mono: "Outfit", system-ui, sans-serif;
+
+  /* paleta gris oscuro (GitHub/VS Code/Claude.ai), también solo para
+     este árbol: el resto de la app (tooltip, onboarding) sigue con la
+     paleta indigo/cyan original — ver --accent más abajo, que NO se
+     toca acá porque la usan elementos fuera del panel */
+  --panel-bg: #0d1117;
+  --panel-bg-soft: #161b22; /* inputs / selects / dropdowns */
+  --border: #30363d;
+  --border-accent: #30363d;
+  --border-accent-strong: #30363d;
+  --border-strong: #30363d;
+  --text: #e6edf3;
+  --text-dim: #7d8590; /* secundario / labels */
+  --text-faint: #484f58; /* texto pequeño / explicativo */
+  --secondary: #7d8590; /* todos sus usos en el panel son "acentos" puntuales que ahora van a gris */
+
   width: 380px;
   min-width: 380px;
   height: 100vh;
@@ -105,9 +126,9 @@ html, body {
 
 .db-header__badge {
   font-size: 11px;
-  color: var(--accent);
-  background: var(--accent-soft);
-  border: 1px solid var(--border-accent-strong);
+  color: var(--text-dim);
+  background: var(--panel-bg-soft);
+  border: 1px solid var(--border-accent);
   border-radius: 2px;
   padding: 3px 10px;
   white-space: nowrap;
@@ -131,11 +152,11 @@ html, body {
 
 .db-section__title {
   font-family: var(--font-ui);
-  font-size: 11px;
+  font-size: 9.5px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--accent);
+  color: var(--text-dim);
   margin: 0 0 2px;
 }
 
@@ -149,7 +170,7 @@ html, body {
   color: var(--text);
   font-size: 12.5px;
   outline: none;
-  transition: border-color 0.15s ease;
+  transition: background 0.12s ease, border-color 0.15s ease;
 }
 
 .terminal-select {
@@ -157,9 +178,14 @@ html, body {
   cursor: pointer;
 }
 
+.terminal-input:hover,
+.terminal-select:hover {
+  background: #1c2128;
+}
+
 .terminal-input:focus,
 .terminal-select:focus {
-  border-color: var(--accent);
+  border-color: var(--text-faint);
 }
 
 .terminal-input::placeholder {
@@ -179,7 +205,7 @@ html, body {
 
 .edu-note {
   font-family: var(--font-ui);
-  font-size: 10.5px;
+  font-size: 9.5px;
   font-style: italic;
   color: var(--text-faint);
   line-height: 1.5;
@@ -187,7 +213,8 @@ html, body {
 }
 
 .edu-note strong {
-  color: var(--text-dim);
+  color: var(--text-faint);
+  font-weight: 500; /* sin negrita agresiva */
   font-style: normal;
 }
 
@@ -213,9 +240,41 @@ html, body {
   color: var(--text);
 }
 
+/* accent-color nativo tiñe thumb Y track-recorrido; para que el azul
+   quede SOLO en el thumb hay que estilizar a mano cada pseudo-elemento */
 .slider-row input[type="range"] {
   flex: 1;
-  accent-color: var(--accent);
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: var(--border-accent);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+
+.slider-row input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #1f6feb;
+  cursor: pointer;
+}
+
+.slider-row input[type="range"]::-moz-range-track {
+  height: 4px;
+  background: var(--border-accent);
+  border-radius: 2px;
+}
+
+.slider-row input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: none;
+  border-radius: 50%;
+  background: #1f6feb;
+  cursor: pointer;
 }
 
 .terminal-btn {
@@ -240,17 +299,60 @@ html, body {
 }
 
 .terminal-btn__kw {
-  color: var(--accent);
   font-weight: 700;
+  /* sin color propio: hereda el color del botón (#insertBtn/#searchBtn/
+     #deleteBtn más abajo), así todo el texto del botón queda del mismo tono */
 }
 
-.terminal-btn--danger:hover {
-  background: rgba(244, 63, 94, 0.12);
-  border-color: #f43f5e;
+/* INSERT / SEARCH / DELETE: fondo sólido al estilo GitHub, texto
+   blanco, radius 6px; hover = versión más clara del mismo color */
+
+#insertBtn {
+  background: #238636;
+  border: 1px solid #238636;
+  color: #ffffff;
+  border-radius: 6px;
 }
 
-.terminal-btn--danger .terminal-btn__kw {
-  color: #f43f5e;
+#insertBtn:hover {
+  background: #2ea043;
+  border-color: #2ea043;
+}
+
+#insertBtn:active {
+  background: #238636;
+}
+
+#searchBtn {
+  background: #1f6feb;
+  border: 1px solid #1f6feb;
+  color: #ffffff;
+  border-radius: 6px;
+}
+
+#searchBtn:hover {
+  background: #388bfd;
+  border-color: #388bfd;
+}
+
+#searchBtn:active {
+  background: #1f6feb;
+}
+
+#deleteBtn {
+  background: #da3633;
+  border: 1px solid #da3633;
+  color: #ffffff;
+  border-radius: 6px;
+}
+
+#deleteBtn:hover {
+  background: #f85149;
+  border-color: #f85149;
+}
+
+#deleteBtn:active {
+  background: #da3633;
 }
 
 /* search results */
@@ -301,7 +403,7 @@ html, body {
 .search-results__bar-fill {
   display: block;
   height: 100%;
-  background: var(--accent);
+  background: var(--text-dim);
 }
 
 .search-results__distance {
@@ -340,7 +442,7 @@ html, body {
 }
 
 .db-log__kw {
-  color: var(--accent);
+  color: var(--text-dim);
   font-weight: 700;
 }
 
