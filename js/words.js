@@ -233,6 +233,27 @@ export function getSimulatedVector(word) {
   return Array.from({ length: SIMULATED_VECTOR_LENGTH }, () => +(rng() * 2 - 1).toFixed(2));
 }
 
+/**
+ * Obtiene el embedding real de `word` desde /api/embed (proxy seguro a
+ * Cohere embed-multilingual-v3.0, 1024 dimensiones). Lanza un Error si
+ * la llamada falla — el caller gestiona el fallback y los avisos de UI.
+ * @param {string} word
+ * @returns {Promise<number[]>}
+ */
+export async function getEmbedding(word) {
+  const res = await fetch("/api/embed", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: word }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error ?? `HTTP ${res.status}`);
+  }
+  const { embedding } = await res.json();
+  return embedding;
+}
+
 // ================================================================
 // Sistema de representación 3D de palabras
 // ================================================================
@@ -262,6 +283,16 @@ function easeOutCubic(t) {
 function easeInCubic(t) {
   return t * t * t;
 }
+
+function easeInOutCubic(t) {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+// Temporizador para reconstruir conexiones tras el vuelo de PCA.
+// Usando setTimeout en lugar de un contador por palabra: cada llamada
+// a repositionWord() resetea el reloj; las conexiones se reconstruyen
+// una sola vez, ~50 ms después de que terminan todas las animaciones.
+let reconnectTimeout = null;
 
 /** Grupo raíz: scene.js solo necesita hacer scene.add(wordGroup) una vez. */
 export const wordGroup = new THREE.Group();
@@ -490,6 +521,36 @@ export function resetHighlights() {
 }
 
 /**
+ * Anima suavemente una palabra desde su posición actual hasta
+ * `targetPosition` en `duration` ms (easeInOutCubic). Mientras dura el
+ * vuelo, las líneas de conexión se ocultan; se reconstruyen al final.
+ *
+ * Se puede llamar varias veces seguidas (para un batch de PCA): el
+ * timeout de reconexión se resetea con cada llamada y solo dispara una
+ * vez, cuando todas las animaciones han terminado.
+ *
+ * @param {string}        word
+ * @param {{x,y,z}}       targetPosition  THREE.Vector3 o plain object
+ * @param {number}        duration         ms (default 800)
+ */
+export function repositionWord(word, targetPosition, duration = 800) {
+  const entry = registry.get(word);
+  if (!entry || entry.removing) return;
+
+  connectionsGroup.visible = false;
+  clearTimeout(reconnectTimeout);
+  reconnectTimeout = setTimeout(() => {
+    updateConnections();
+    connectionsGroup.visible = true;
+  }, duration + 60);
+
+  entry.repoFrom = entry.group.position.clone();
+  entry.repoTo = new THREE.Vector3(targetPosition.x, targetPosition.y, targetPosition.z);
+  entry.repoAt = performance.now();
+  entry.repoDuration = duration;
+}
+
+/**
  * Avanza la animación de pulso de todos los puntos de luz, y la
  * animación de entrada/salida (INSERT/DELETE) de cada palabra. Debe
  * llamarse una vez por frame desde el loop de render, con el tiempo
@@ -520,6 +581,22 @@ export function updateWordPulses(time) {
     } else {
       const t = Math.min(1, (now - spawnAt) / SPAWN_DURATION);
       group.scale.setScalar(easeOutCubic(t)); // 0 → 1
+    }
+
+    // Animación de reposicionamiento por PCA (lerp posición)
+    if (entry.repoTo) {
+      const rt = Math.min(1, (now - entry.repoAt) / entry.repoDuration);
+      group.position.lerpVectors(entry.repoFrom, entry.repoTo, easeInOutCubic(rt));
+      if (rt >= 1) {
+        group.position.copy(entry.repoTo);
+        // Sincroniza userData.position para que tooltip y search usen la posición final
+        const snapped = entry.repoTo.clone();
+        group.userData.position = snapped;
+        glow.userData.position = snapped;
+        label.userData.position = snapped;
+        entry.repoFrom = null;
+        entry.repoTo = null;
+      }
     }
   });
 

@@ -5,6 +5,7 @@
 ![Three.js](https://img.shields.io/badge/Three.js-000000?style=flat-square&logo=three.js&logoColor=white)
 ![JavaScript](https://img.shields.io/badge/JavaScript-ES6%2B-F7DF1E?style=flat-square&logo=javascript&logoColor=black)
 ![CSS3](https://img.shields.io/badge/CSS3-1572B6?style=flat-square&logo=css3&logoColor=white)
+![Cohere](https://img.shields.io/badge/Cohere-embed--multilingual--v3.0-39594A?style=flat-square)
 ![No Build Step](https://img.shields.io/badge/build-none-success?style=flat-square)
 
 ![Demo](demo.gif)
@@ -14,62 +15,119 @@
 
 ## What is this?
 
-**Vector Space Explorer** is a small, self-contained 3D application that simulates how a vector database works — and lets you *see* it happening in real time, instead of just reading about it.
+**Vector Space Explorer** is a self-contained 3D application that shows how a vector database works — and lets you *see* it happening in real time, instead of just reading about it.
 
-Every word you insert becomes a point of light positioned in 3D space. Words with related meaning cluster together and connect with glowing lines. A left-hand console — styled like a SQL/terminal client — lets you `INSERT`, `SEARCH` and `DELETE` vectors exactly like you would against a real vector database, while an educational layer (hover tooltips, a "what just happened" panel, an onboarding overlay) explains the underlying concept in plain language as it happens.
+Every word you insert gets converted into a **real 1024-dimensional embedding** by Cohere's `embed-multilingual-v3.0` model (optimized for Spanish), then **reduced to 3D via PCA** so it can be placed in the scene. Words with related meaning cluster together and connect with glowing lines. As you insert more words, the whole space reorganizes smoothly — the geometry is semantics made visible.
 
-It started as a small visualization exercise and grew, iteration by iteration, into a fairly complete demo of: 3D rendering from scratch (manual camera/orbit controls, no `OrbitControls` import), a tiny custom particle/shader system, an event-driven architecture connecting the UI and the 3D scene, and UX details aimed at making an abstract ML concept tangible for a non-technical audience.
+A left-hand console — styled like a SQL/terminal client — lets you `INSERT`, `SEARCH` and `DELETE` vectors exactly like you would against a real vector database, while an educational layer (hover tooltips, a "what just happened" panel, an onboarding overlay) explains the underlying concept in plain language as it happens.
 
-No React, no Vue, no bundler, no `npm install`. Just HTML, CSS, and ES modules — Three.js itself is the only dependency, loaded straight from a CDN.
+No React, no Vue, no bundler, no `npm install`. Just HTML, CSS, and ES modules — Three.js is the only frontend dependency, loaded straight from a CDN. The Cohere API key never touches the browser: all embedding calls go through a Vercel serverless function that acts as a secure proxy.
+
+## Architecture
+
+```
+┌─────────────────────────────┐
+│         Browser             │
+│                             │
+│  Three.js 3D scene          │
+│  ┌─────────┐  ┌──────────┐  │
+│  │ scene.js│  │  ui.js   │  │
+│  └────┬────┘  └────┬─────┘  │
+│       └─────┬──────┘        │
+│         CustomEvents        │
+│          (decoupled)        │
+│                             │
+│  words.js ──► pca.js        │
+│  (registry + PCA layout)    │
+└──────────────┬──────────────┘
+               │ POST /api/embed
+               │ { text: "palabra" }
+┌──────────────▼──────────────┐
+│    Vercel Serverless Fn      │
+│    api/embed.js              │
+│    (secure proxy — API key   │
+│     never sent to browser)   │
+└──────────────┬──────────────┘
+               │ POST /v2/embed
+               │ Authorization: Bearer ***
+┌──────────────▼──────────────┐
+│    Cohere API                │
+│    embed-multilingual-v3.0   │
+│    1024-dimensional output   │
+└─────────────────────────────┘
+```
+
+`ui.js` and `scene.js` never call into each other directly — they communicate exclusively through `CustomEvent`s on `window`, keeping the DOM/UI layer and the Three.js/3D layer fully decoupled.
 
 ## Concepts demonstrated
 
 | Concept | How it shows up in this project |
 |---|---|
-| **Vector embeddings** | Each word is assigned a vector. To keep the visualization honest and inspectable, this demo uses the word's actual 3D position as its "embedding" (plus a small deterministic decorative vector shown in the UI) — a deliberate simplification of what a real embedding model produces. |
-| **Similarity search** | `SEARCH` finds the *k* nearest words by real Euclidean distance in the 3D space, highlights them, and ranks results with a visual distance bar — the same core idea behind semantic search, minus the neural network. |
+| **Vector embeddings** | Words inserted via the console get real 1024-dim embeddings from Cohere's multilingual model. The 24 background words use a fixed artistic layout; user-inserted words use genuine semantic vectors. |
+| **Dimensionality reduction** | PCA (implemented from scratch, no libraries) reduces Cohere's 1024-dim output to 3D for rendering. The Gram-matrix dual approach runs in <5 ms even with 100+ words. Each new insertion triggers a smooth 800 ms repositioning of all real-embedding words. |
+| **Similarity search** | `SEARCH` finds the *k* nearest words by Euclidean distance in 3D, highlights them, and ranks results with a visual distance bar — the same core idea behind semantic search. |
 | **Vector databases** | The left panel mirrors the basic CRUD surface of a vector DB: `INSERT INTO vectors`, `SEARCH similar`, `DELETE vector` — complete with an operation log and a live vector count, so the mental model maps directly onto tools like Pinecone, Qdrant, or pgvector. |
-| **Real-time 3D visualization** | Every operation has an immediate, animated 3D consequence: inserted points burst into existence, deleted points implode and fall, searches send a visible pulse through the space — so the data structure stops being an abstraction and becomes something you can watch change. |
+| **Secure API proxy** | The Cohere API key lives only in a Vercel environment variable. The browser calls `/api/embed`; the serverless function adds the key and forwards the request. The key is never exposed to the client. |
+| **Real-time 3D** | Every operation has an immediate animated consequence: inserted points burst into existence, deleted points implode, searches send a visible pulse, and PCA repositioning flies all words to their new semantic positions simultaneously. |
 
 ## How to run
 
-This project uses native ES modules and an `importmap`, which browsers refuse to load over the `file://` protocol (CORS). Opening `index.html` by double-clicking it **will not work** — you need a tiny local static server, which takes one command and no installation beyond what you likely already have:
+### Local (without Cohere embeddings)
+
+This project uses native ES modules and an `importmap`, which browsers refuse to load over `file://`. You need a local static server:
 
 ```bash
-# Python (already installed on most systems)
+# Python (already on most systems)
 python -m http.server 8080
 
 # or Node.js
 npx serve .
 ```
 
-Then open **http://localhost:8080** in your browser.
+Open **http://localhost:8080**. Without a running Vercel Function, inserts fall back to a deterministic 6-value simulated vector — the 3D layout and all UI features still work.
+
+### Deployed on Vercel (with real embeddings)
+
+1. Push the repo to GitHub.
+2. Import it in [vercel.com](https://vercel.com) — zero config needed.
+3. Add the environment variable (see below).
+4. Deploy.
+
+## Environment variables
+
+| Variable | Where to set | Description |
+|---|---|---|
+| `COHERE_API_KEY` | Vercel → Project → Settings → Environment Variables | API key from [dashboard.cohere.com](https://dashboard.cohere.com). The serverless function `api/embed.js` reads it server-side; it is never sent to the browser. |
+
+The app degrades gracefully without the key: inserts log `⚠ Using simulated vector` and continue working with a placeholder embedding. No crash, no blank screen.
 
 ## Project structure
 
 ```
 vector-space-explorer/
-├── index.html          # Two-panel layout (Vector DB console + 3D canvas), font/CDN imports
+├── index.html           # Two-panel layout + importmap (Three.js from CDN)
+├── vercel.json          # Minimal Vercel v2 config (static + functions)
+├── package.json         # engines: node >=18 (for native fetch in the function)
+├── api/
+│   └── embed.js          # Vercel Function — secure Cohere proxy
 ├── css/
-│   └── style.css        # Terminal-inspired theme: colors, layout, collapsible panels, animations
+│   └── style.css          # GitHub-dark theme, CSS variable scoping, animations
 ├── js/
-│   ├── scene.js          # Three.js setup, manual orbit camera, raycasting, render loop, visual effects wiring
-│   ├── particles.js       # Ambient background particle field (custom shader) + insert/search/delete effects
-│   ├── words.js           # Word/vector data model, 3D word representation (glow + label), connections graph
-│   └── ui.js               # Left panel: INSERT/SEARCH/DELETE console, op log, tooltips' data, onboarding
+│   ├── scene.js            # Three.js setup, manual orbit camera, raycasting, render loop
+│   ├── particles.js         # Ambient particle field (custom shader) + insert/search/delete FX
+│   ├── words.js             # Word registry, 3D visuals (glow + label), connections, PCA animation
+│   ├── pca.js               # PCA from scratch — Gram matrix, power iteration, sign normalization
+│   └── ui.js                 # Console panel: INSERT/SEARCH/DELETE, Cohere calls, PCA wiring, onboarding
 └── README.md
 ```
 
-`ui.js` and `scene.js` never call into each other directly — they communicate exclusively through `CustomEvent`s on `window`, which keeps the DOM/UI layer and the Three.js/3D layer fully decoupled.
-
 ## Next steps
 
-This project is intentionally a *simulation* of a vector database — the "embeddings" are simplified so the math stays visualizable. The natural next iterations would be:
-
-- **Plug in real embeddings** — call the OpenAI API (`text-embedding-3-small` or similar) to generate genuine high-dimensional vectors for inserted words, instead of the deterministic placeholder used now.
-- **Dimensionality reduction for visualization** — real embeddings live in 384+ dimensions; reducing them to 3D for rendering would need PCA, t-SNE, or UMAP rather than the fixed zone layout used here.
-- **Back it with a real vector database** — swap the in-memory word registry for an actual store like Qdrant, Pinecone, or pgvector, so `INSERT`/`SEARCH`/`DELETE` hit a real index instead of a JS `Map`.
-- **Persistence** — save/restore the inserted vectors across sessions (currently everything resets on reload).
+- ✅ **Real embeddings** — Cohere `embed-multilingual-v3.0` via a secure Vercel Function proxy
+- ✅ **Dimensionality reduction** — PCA from scratch (Gram matrix dual approach, <5 ms at 100 words)
+- ⬜ **Real vector database** — swap the in-memory registry for Qdrant, Pinecone, or pgvector so `INSERT`/`SEARCH`/`DELETE` hit a real index
+- ⬜ **Better projection** — t-SNE or UMAP instead of PCA for non-linear structure preservation
+- ⬜ **Persistence** — save/restore vectors across sessions (everything resets on reload)
 
 ## Author
 

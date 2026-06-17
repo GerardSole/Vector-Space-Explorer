@@ -24,7 +24,10 @@ import {
   resetHighlights,
   getInsertPosition,
   getSimulatedVector,
+  getEmbedding,
+  repositionWord,
 } from "./words.js";
+import { pca, normalizeProjection } from "./pca.js";
 
 const dbPanel = document.getElementById("dbPanel");
 const CATEGORIES = Object.keys(CATEGORY_COLORS); // ["emotion","nature","animal","object","person","custom"]
@@ -50,10 +53,9 @@ dbPanel.innerHTML = `
       </select>
       <div class="vector-preview" id="insertVectorPreview">[ ]</div>
       <p class="edu-note">
-        Vector simulado y <strong>determinista</strong>: la misma palabra siempre da el mismo vector
-        (prueba a borrar una palabra y reinsertarla). En producción real, este vector lo generaría un
-        modelo de embeddings — p. ej. <code>OpenAI text-embedding-3-small</code> — con cientos de
-        dimensiones, no estos 6 números de juguete.
+        El vector real lo genera <code>Cohere embed-multilingual-v3.0</code> (1024 dimensiones),
+        optimizado para español. Si no hay conexión con la API, se usa un vector determinista de
+        6 valores como fallback.
       </p>
       <button class="terminal-btn" id="insertBtn"><span class="terminal-btn__kw">INSERT INTO</span> vectors</button>
     </section>
@@ -172,7 +174,7 @@ function logError(verb, rest) {
 const EDU_EXPLANATIONS = {
   insert: {
     icon: "➕",
-    text: "Has convertido una palabra en un vector de 384 dimensiones y la has guardado en el índice, junto a las palabras más parecidas.",
+    text: "Has convertido una palabra en un vector real de 1024 dimensiones generado por Cohere y lo has guardado en el índice, junto a las palabras semánticamente más parecidas.",
   },
   search: {
     icon: "🔍",
@@ -201,6 +203,52 @@ eduToggleEl.addEventListener("click", () => {
   eduToggleIconEl.textContent = collapsed ? "▸" : "▾";
 });
 
+// ---------------------------------------------------------------- PCA — reposicionamiento semántico
+//
+// Se ejecuta cada vez que hay ≥ 2 palabras con embeddings reales de
+// Cohere (1024 dims). Las palabras con vectores simulados (palabras
+// sembradas, sin clave API) no participan y conservan sus posiciones
+// artísticas originales.
+//
+// prevPCAPositions guarda la última proyección por palabra para alinear
+// los signos entre llamadas sucesivas (la iteración potencia puede
+// converger a ±v; el signo canónico de pca.js es consistente pero la
+// escala varía, y la alineación con la posición anterior evita "saltos
+// de espejo" al insertar o eliminar palabras).
+
+const prevPCAPositions = new Map(); // word → [x, y, z] de la última proyección
+
+function applyPCA(rows) {
+  const realRows = rows.filter((r) => r.vector && r.vector.length === 1024);
+  if (realRows.length < 2) return;
+
+  let coords = pca(realRows.map((r) => r.vector), 3);
+
+  // Alinear signos con posiciones previas para evitar flips de espejo
+  for (let dim = 0; dim < 3; dim++) {
+    let corr = 0;
+    let count = 0;
+    for (let i = 0; i < realRows.length; i++) {
+      const prev = prevPCAPositions.get(realRows[i].word);
+      if (prev) { corr += coords[i][dim] * prev[dim]; count++; }
+    }
+    if (count > 0 && corr < 0) {
+      for (let i = 0; i < coords.length; i++) coords[i][dim] = -coords[i][dim];
+    }
+  }
+
+  coords = normalizeProjection(coords, 7);
+
+  for (let i = 0; i < realRows.length; i++) {
+    const row = realRows[i];
+    const [x, y, z] = coords[i];
+    prevPCAPositions.set(row.word, [x, y, z]);
+    // Actualiza la posición lógica de la fila (usada por SEARCH y DELETE-fx)
+    row.position.set(x, y, z);
+    repositionWord(row.word, row.position, 800);
+  }
+}
+
 // ---------------------------------------------------------------- INSERT
 
 function refreshInsertPreview() {
@@ -210,7 +258,7 @@ function refreshInsertPreview() {
 
 insertWordEl.addEventListener("input", refreshInsertPreview);
 
-insertBtn.addEventListener("click", () => {
+insertBtn.addEventListener("click", async () => {
   const word = insertWordEl.value.trim().toLowerCase();
   const category = insertCategoryEl.value;
 
@@ -223,22 +271,49 @@ insertBtn.addEventListener("click", () => {
     return;
   }
 
-  // posición cercana al centroide actual de su categoría (±0.8u, ver
-  // getInsertPosition en words.js) — addWordToScene() ya anima la
-  // entrada del punto (escala 0→1 con ease)
+  // loading state — deshabilita el botón mientras espera la API
+  insertBtn.disabled = true;
+  insertBtn.innerHTML = '<span class="terminal-btn__kw">INSERT INTO</span> Generando vector…';
+  insertPreviewEl.textContent = "Generando vector…";
+
+  let embedding;
+  let isSimulated = false;
+  try {
+    embedding = await getEmbedding(word);
+  } catch {
+    // fallback al vector determinista si Cohere no responde
+    embedding = getSimulatedVector(word);
+    isSimulated = true;
+  } finally {
+    insertBtn.disabled = false;
+    insertBtn.innerHTML = '<span class="terminal-btn__kw">INSERT INTO</span> vectors';
+  }
+
+  // muestra los primeros 6 valores como antes (Cohere devuelve 1024)
+  insertPreviewEl.textContent =
+    `[${embedding.slice(0, 6).map((v) => v.toFixed(2)).join(", ")}${embedding.length > 6 ? "…" : ""}]`;
+
+  // posición cercana al centroide actual de su categoría (±0.8u)
   const position = getInsertPosition(category);
   addWordToScene(word, position, category);
-  rows.push({ word, category, position });
+  rows.push({ word, category, position, vector: embedding });
 
-  // burst de partículas desde el punto nuevo (lo dibuja scene.js; ui.js
-  // no toca Three.js directamente)
+  // Reposicionamiento semántico: PCA sobre todos los embeddings reales.
+  // Las palabras sembradas (sin vector Cohere) no se mueven.
+  applyPCA(rows);
+
+  // burst de partículas desde el punto nuevo (lo dibuja scene.js)
   window.dispatchEvent(
     new CustomEvent("vse:insert-fx", { detail: { position, color: CATEGORY_COLORS[category] } })
   );
 
   refreshVectorCount();
   refreshDeleteOptions();
-  logSuccess("INSERT", `'${word}' → vector[384] stored`);
+
+  if (isSimulated) {
+    log(`<span class="db-log__err">⚠</span> ${kw("EMBED")} → Cohere sin respuesta, usando vector simulado`);
+  }
+  logSuccess("INSERT", `'${word}' → vector[${embedding.length}] from ${isSimulated ? "simulated" : "Cohere"}`);
   setEducation("insert");
 
   insertWordEl.value = "";
@@ -350,7 +425,11 @@ deleteBtn.addEventListener("click", () => {
   // updateWordPulses (words.js).
   removeWordFromScene(word);
   rows = rows.filter((row) => row.word !== word);
+  prevPCAPositions.delete(word);
   resetHighlights();
+
+  // Recalcula PCA sin la palabra eliminada para que las demás se reorganicen
+  applyPCA(rows);
 
   if (deletedRow) {
     window.dispatchEvent(
