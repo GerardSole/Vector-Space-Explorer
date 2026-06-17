@@ -159,27 +159,6 @@ export function getSimulatedVector(word) {
   return Array.from({ length: SIMULATED_VECTOR_LENGTH }, () => +(rng() * 2 - 1).toFixed(2));
 }
 
-/**
- * Obtiene el embedding real de `word` desde /api/embed (proxy seguro a
- * Cohere embed-multilingual-v3.0, 1024 dimensiones). Lanza un Error si
- * la llamada falla — el caller gestiona el fallback y los avisos de UI.
- * @param {string} word
- * @returns {Promise<number[]>}
- */
-export async function getEmbedding(word) {
-  const res = await fetch("/api/embed", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: word }),
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error ?? `HTTP ${res.status}`);
-  }
-  const { embedding } = await res.json();
-  return embedding;
-}
-
 // ================================================================
 // Sistema de representación 3D de palabras
 // ================================================================

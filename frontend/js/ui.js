@@ -24,11 +24,11 @@ import {
   resetHighlights,
   getInsertPosition,
   getSimulatedVector,
-  getEmbedding,
   repositionWord,
   makeVector3,
 } from "./words.js";
 import { pca, normalizeProjection } from "./pca.js";
+import { insertWord, searchSimilar, deleteWord, listVectors } from "./api.js";
 
 const dbPanel = document.getElementById("dbPanel");
 const CATEGORIES = Object.keys(CATEGORY_COLORS); // ["emotion","nature","animal","object","person","custom"]
@@ -258,47 +258,41 @@ insertBtn.addEventListener("click", async () => {
   const word = insertWordEl.value.trim().toLowerCase();
   const category = insertCategoryEl.value;
 
-  if (!word) {
-    logError("INSERT", "→ palabra vacía");
-    return;
-  }
-  if (rows.some((row) => row.word === word)) {
-    logError("INSERT", `'${word}' → ya existe`);
-    return;
-  }
+  if (!word) { logError("INSERT", "→ palabra vacía"); return; }
+  if (rows.some((row) => row.word === word)) { logError("INSERT", `'${word}' → ya existe`); return; }
 
-  // loading state — deshabilita el botón mientras espera la API
   insertBtn.disabled = true;
   insertBtn.innerHTML = '<span class="terminal-btn__kw">INSERT INTO</span> Generando vector…';
   insertPreviewEl.textContent = "Generando vector…";
 
-  let embedding;
+  let vector;
+  let vectorPreview;
+  let dimensions;
   let isSimulated = false;
+
   try {
-    embedding = await getEmbedding(word);
+    const result = await insertWord(word, category);
+    vector = result.vector;
+    vectorPreview = result.vector_preview;
+    dimensions = result.dimensions;
   } catch {
-    // fallback al vector determinista si Cohere no responde
-    embedding = getSimulatedVector(word);
+    vector = getSimulatedVector(word);
+    vectorPreview = vector.slice(0, 6);
+    dimensions = vector.length;
     isSimulated = true;
   } finally {
     insertBtn.disabled = false;
     insertBtn.innerHTML = '<span class="terminal-btn__kw">INSERT INTO</span> vectors';
   }
 
-  // muestra los primeros 6 valores como antes (Cohere devuelve 1024)
-  insertPreviewEl.textContent =
-    `[${embedding.slice(0, 6).map((v) => v.toFixed(2)).join(", ")}${embedding.length > 6 ? "…" : ""}]`;
+  insertPreviewEl.textContent = `[${vectorPreview.map((v) => v.toFixed(2)).join(", ")}…]`;
 
-  // posición cercana al centroide actual de su categoría (±0.8u)
   const position = getInsertPosition(category);
   addWordToScene(word, position, category);
-  rows.push({ word, category, position, vector: embedding });
+  rows.push({ word, category, position, vector });
 
-  // Reposicionamiento semántico: PCA sobre todos los embeddings reales.
-  // Las palabras sembradas (sin vector Cohere) no se mueven.
   applyPCA(rows);
 
-  // burst de partículas desde el punto nuevo (lo dibuja scene.js)
   window.dispatchEvent(
     new CustomEvent("vse:insert-fx", { detail: { position, color: CATEGORY_COLORS[category] } })
   );
@@ -307,9 +301,9 @@ insertBtn.addEventListener("click", async () => {
   refreshDeleteOptions();
 
   if (isSimulated) {
-    log(`<span class="db-log__err">⚠</span> ${kw("EMBED")} → Cohere sin respuesta, usando vector simulado`);
+    log(`<span class="db-log__err">⚠</span> ${kw("EMBED")} → backend sin respuesta, usando vector simulado`);
   }
-  logSuccess("INSERT", `'${word}' → vector[${embedding.length}] from ${isSimulated ? "simulated" : "Cohere"}`);
+  logSuccess("INSERT", `'${word}' → vector[${dimensions}] from ${isSimulated ? "simulated" : "backend"}`);
   setEducation("insert");
 
   insertWordEl.value = "";
@@ -357,74 +351,86 @@ function centroidOf(positions) {
   return { x: sum.x / n, y: sum.y / n, z: sum.z / n };
 }
 
-searchBtn.addEventListener("click", () => {
+searchBtn.addEventListener("click", async () => {
   const query = searchWordEl.value.trim().toLowerCase();
   const k = Number(kSliderEl.value);
-  const target = rows.find((row) => row.word === query);
 
-  if (!query) {
-    logError("SEARCH", "→ palabra vacía");
-    return;
-  }
-  if (!target) {
-    renderSearchResults([]);
-    logError("SEARCH", `'${query}' → not found`);
-    return;
-  }
+  if (!query) { logError("SEARCH", "→ palabra vacía"); return; }
 
-  // onda expansiva desde el punto buscado (lo dibuja scene.js)
-  window.dispatchEvent(
-    new CustomEvent("vse:search-fx", {
-      detail: { position: target.position, color: CATEGORY_COLORS[target.category] },
-    })
-  );
-
+  searchBtn.disabled = true;
   const t0 = performance.now();
-  const results = rows
-    .filter((row) => row !== target)
-    .map((row) => ({ row, distance: target.position.distanceTo(row.position) }))
-    .sort((a, b) => a.distance - b.distance)
-    .slice(0, k);
+
+  let apiResults;
+  try {
+    apiResults = await searchSimilar(query, k);
+  } catch {
+    // fallback: búsqueda local por distancia 3D si el backend no responde
+    const target = rows.find((row) => row.word === query);
+    if (!target) {
+      renderSearchResults([]);
+      logError("SEARCH", `'${query}' → not found`);
+      searchBtn.disabled = false;
+      return;
+    }
+    apiResults = rows
+      .filter((row) => row !== target)
+      .map((row) => ({ word: row.word, category: row.category, score: 0, distance: target.position.distanceTo(row.position) }))
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, k);
+  } finally {
+    searchBtn.disabled = false;
+  }
+
   const elapsedMs = Math.round(performance.now() - t0);
 
+  // Adapta los resultados del backend al formato de renderSearchResults
+  const results = apiResults.map((r) => ({
+    row: { word: r.word, category: r.category },
+    distance: r.distance,
+  }));
   renderSearchResults(results);
-  highlightWords([target.word, ...results.map((r) => r.row.word)]);
 
-  // zoom suave de cámara hacia la zona donde cayeron los resultados
-  // (centroide de target + resultados), con un radio más amplio que el
-  // foco de una sola palabra para que se vea el grupo completo
-  const zoneCenter = centroidOf([target.position, ...results.map((r) => r.row.position)]);
-  window.dispatchEvent(
-    new CustomEvent("vse:focus-word", { detail: { position: zoneCenter, radius: 10 } })
-  );
+  const allWords = [query, ...apiResults.map((r) => r.word)];
+  highlightWords(allWords);
 
-  logSuccess("SEARCH", `'${query}' → k=${k} results in ${elapsedMs}ms`);
+  // Efectos visuales usando posiciones locales de rows
+  const targetRow = rows.find((row) => row.word === query);
+  if (targetRow) {
+    window.dispatchEvent(
+      new CustomEvent("vse:search-fx", {
+        detail: { position: targetRow.position, color: CATEGORY_COLORS[targetRow.category] },
+      })
+    );
+  }
+
+  const resultPositions = apiResults
+    .map((r) => rows.find((row) => row.word === r.word)?.position)
+    .filter(Boolean);
+
+  if (resultPositions.length) {
+    const allPositions = targetRow ? [targetRow.position, ...resultPositions] : resultPositions;
+    window.dispatchEvent(
+      new CustomEvent("vse:focus-word", { detail: { position: centroidOf(allPositions), radius: 10 } })
+    );
+  }
+
+  logSuccess("SEARCH", `'${query}' → k=${apiResults.length} results in ${elapsedMs}ms`);
   setEducation("search");
 });
 
 // ---------------------------------------------------------------- DELETE
 
-deleteBtn.addEventListener("click", () => {
+deleteBtn.addEventListener("click", async () => {
   const word = deleteWordEl.value;
-  if (!word) {
-    logError("DELETE", "→ no hay vectores para borrar");
-    return;
-  }
+  if (!word) { logError("DELETE", "→ no hay vectores para borrar"); return; }
 
-  // se necesita la posición/categoría ANTES de filtrarla de `rows`, para
-  // poder mandar el efecto de implosión al lugar correcto
   const deletedRow = rows.find((row) => row.word === word);
 
-  // removeWordFromScene() solo inicia la animación de salida (scale
-  // 1→0 + fade); la remoción real del registro/escena y la
-  // regeneración de las líneas ocurren al terminar, dentro de
-  // updateWordPulses (words.js).
+  // Actualiza UI de inmediato; la llamada a Qdrant va detrás
   removeWordFromScene(word);
   rows = rows.filter((row) => row.word !== word);
   prevPCAPositions.delete(word);
   resetHighlights();
-
-  // Recalcula PCA sin la palabra eliminada para que las demás se reorganicen
   applyPCA(rows);
 
   if (deletedRow) {
@@ -439,6 +445,13 @@ deleteBtn.addEventListener("click", () => {
   refreshDeleteOptions();
   logSuccess("DELETE", `'${word}' → vector removed`);
   setEducation("delete");
+
+  // Elimina de Qdrant en segundo plano
+  try {
+    await deleteWord(word);
+  } catch (e) {
+    log(`<span class="db-log__err">⚠</span> ${kw("DELETE")} → Qdrant: ${e.message}`);
+  }
 });
 
 // ---------------------------------------------------------------- selección desde la escena 3D
@@ -567,39 +580,70 @@ function showOnboarding() {
       <div class="loading-bar-track">
         <div class="loading-bar-fill" id="loadingBarFill"></div>
       </div>
-      <p class="loading-status" id="loadingStatus">Conectando con Cohere (0 / ${WORD_DATA.length})…</p>
+      <p class="loading-status" id="loadingStatus">Conectando con el backend…</p>
     </div>
   `;
   document.body.appendChild(overlay);
 
   const barFill = document.getElementById("loadingBarFill");
   const statusEl = document.getElementById("loadingStatus");
-  const total = WORD_DATA.length;
-  let done = 0;
 
-  function updateProgress() {
-    done++;
-    barFill.style.width = `${(done / total) * 100}%`;
-    statusEl.textContent = done < total
-      ? `Generando embeddings (${done} / ${total})…`
-      : "Calculando PCA…";
+  let results;  // [{ word, category, vector }]
+  let src;
+
+  // ── 1. Intenta restaurar datos persistidos desde Qdrant ───────────
+  let existing = [];
+  try {
+    existing = await listVectors();
+  } catch {
+    // backend no disponible, continúa con semilla fresca
   }
 
-  // ── embeddings en paralelo con fallback por palabra ───────────────
-  const results = await Promise.all(
-    WORD_DATA.map(async (entry) => {
-      let vector;
-      try {
-        vector = await getEmbedding(entry.word);
-      } catch {
-        vector = getSimulatedVector(entry.word);
-      }
-      updateProgress();
-      return { word: entry.word, category: entry.cluster, vector };
-    })
-  );
+  if (existing.length > 0) {
+    // ── RESTORE: hay datos en Qdrant ─────────────────────────────
+    statusEl.textContent = `Restaurando ${existing.length} vectores de Qdrant…`;
+    barFill.style.width = "100%";
 
-  // ── PCA: normaliza dimensiones (1024 real vs 6 simulado) ──────────
+    results = existing.map((e) => ({
+      word: e.word,
+      category: e.category,
+      vector: e.vector,   // vector completo devuelto por el backend
+    }));
+    src = "Qdrant";
+
+  } else {
+    // ── SEED: Qdrant vacío — genera embeddings para las palabras iniciales
+    const total = WORD_DATA.length;
+    let done = 0;
+
+    function updateProgress() {
+      done++;
+      barFill.style.width = `${(done / total) * 100}%`;
+      statusEl.textContent = done < total
+        ? `Generando embeddings (${done} / ${total})…`
+        : "Calculando PCA…";
+    }
+
+    results = await Promise.all(
+      WORD_DATA.map(async (entry) => {
+        let vector;
+        try {
+          const res = await insertWord(entry.word, entry.cluster);
+          vector = res.vector;
+        } catch {
+          // fallback: vector simulado local si el backend no responde
+          vector = getSimulatedVector(entry.word);
+        }
+        updateProgress();
+        return { word: entry.word, category: entry.cluster, vector };
+      })
+    );
+    src = results[0].vector.length === 1024 ? "Cohere" : "simulados";
+  }
+
+  statusEl.textContent = "Calculando PCA…";
+
+  // ── 2. PCA sobre los vectores (normaliza dims si hay mezcla) ──────
   const maxDim = Math.max(...results.map((r) => r.vector.length));
   const vectors = results.map((r) =>
     r.vector.length === maxDim
@@ -608,7 +652,7 @@ function showOnboarding() {
   );
   const coords = normalizeProjection(pca(vectors, 3), 7);
 
-  // ── placements: posición THREE.Vector3 + vector para userData ─────
+  // ── 3. Construye placements con posiciones 3D ─────────────────────
   const placements = results.map((r, i) => ({
     word: r.word,
     category: r.category,
@@ -616,7 +660,6 @@ function showOnboarding() {
     position: makeVector3(coords[i][0], coords[i][1], coords[i][2]),
   }));
 
-  // ── inicializar rows con posiciones y vectores reales ─────────────
   rows = placements.map((p) => ({
     word: p.word,
     category: p.category,
@@ -624,24 +667,21 @@ function showOnboarding() {
     vector: p.vector,
   }));
 
-  // Pre-poblar mapa de alineación de signos para que el primer INSERT
-  // del usuario no cause un flip de espejo respecto al layout inicial.
+  // Pre-poblar mapa de alineación de signos
   placements.forEach((p, i) => {
     prevPCAPositions.set(p.word, [coords[i][0], coords[i][1], coords[i][2]]);
   });
 
-  // ── notificar a scene.js ──────────────────────────────────────────
+  // ── 4. Notifica a scene.js para sembrar la nube 3D ────────────────
   window.dispatchEvent(new CustomEvent("vse:words-ready", { detail: { placements } }));
 
-  // ── refrescar panel izquierdo ─────────────────────────────────────
   refreshVectorCount();
   refreshDeleteOptions();
   refreshInsertPreview();
 
-  const src = results[0].vector.length === 1024 ? "Cohere" : "simulados";
-  logSuccess("READY", `${rows.length} embeddings cargados (${src})`);
+  logSuccess("READY", `${rows.length} vectores cargados desde ${src}`);
 
-  // ── fade out overlay → onboarding ────────────────────────────────
+  // ── 5. Fade out overlay → onboarding ─────────────────────────────
   overlay.style.opacity = "0";
   overlay.style.pointerEvents = "none";
   setTimeout(() => {
