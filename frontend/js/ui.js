@@ -582,18 +582,42 @@ function showOnboarding() {
   const statusEl = document.getElementById("loadingStatus");
 
   // ── listVectors() es la ÚNICA fuente de verdad ───────────────────
-  // No hay fallback a WORD_DATA: el seed es responsabilidad del backend.
+  // Reintentos con backoff: en Render free tier el contenedor puede
+  // estar durmiendo (cold start ~20-40s). El error CORS que reporta el
+  // browser es síntoma de que Render devuelve 503 sin cabeceras propias;
+  // cuando el contenedor arranca, las peticiones posteriores funcionan.
+  const MAX_RETRIES = 5;
+  const RETRY_DELAY_MS = 7000;
+
   let existing;
-  try {
-    existing = await listVectors();
-    console.log(`Cargando ${existing.length} vectores desde Qdrant…`);
-  } catch (err) {
-    console.error("Error al conectar con el backend:", err);
-    statusEl.textContent = "⚠ No se pudo conectar con el backend";
+  let lastErr;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      statusEl.textContent = attempt === 1
+        ? "Conectando con el backend…"
+        : `Backend iniciando… intento ${attempt}/${MAX_RETRIES}`;
+      // barra de progreso animada durante la espera
+      barFill.style.width = `${(attempt / MAX_RETRIES) * 55}%`;
+      existing = await listVectors();
+      console.log(`Cargando ${existing.length} vectores desde Qdrant…`);
+      lastErr = null;
+      break;
+    } catch (err) {
+      lastErr = err;
+      console.warn(`Intento ${attempt}/${MAX_RETRIES} fallido:`, err.message);
+      if (attempt < MAX_RETRIES) {
+        statusEl.textContent = `Backend dormido, reintentando en ${RETRY_DELAY_MS / 1000}s… (${attempt}/${MAX_RETRIES})`;
+        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+      }
+    }
+  }
+
+  if (lastErr) {
+    console.error("No se pudo conectar con el backend tras varios intentos:", lastErr);
+    statusEl.textContent = "⚠ Backend no disponible — escena vacía";
     barFill.style.background = "var(--accent, #f43f5e)";
     barFill.style.width = "100%";
     await new Promise((r) => setTimeout(r, 2500));
-    // Escena vacía pero funcional — el usuario puede reintentar
     window.dispatchEvent(new CustomEvent("vse:words-ready", { detail: { placements: [] } }));
     rows = [];
     refreshVectorCount();
