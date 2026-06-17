@@ -4,7 +4,7 @@
 const API_URL =
   window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
     ? "http://localhost:8000"
-    : "https://tu-backend.onrender.com"; // TODO: reemplaza con la URL real de Render
+    : "https://vector-space-explorer.onrender.com/"; // TODO: reemplaza con la URL real de Render
 
 async function _request(path, options = {}) {
   const res = await fetch(`${API_URL}${path}`, {
