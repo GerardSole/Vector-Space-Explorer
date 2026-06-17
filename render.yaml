@@ -12,3 +12,5 @@ services:
         sync: false
       - key: QDRANT_COLLECTION
         value: vectors
+      - key: CORS_ORIGINS
+        value: "*"

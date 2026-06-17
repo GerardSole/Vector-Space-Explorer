@@ -5,15 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from routers import embed, vectors
 from services.qdrant import init_collection
 from seed import seed as run_seed
-from config import PORT
-
-ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "http://localhost:8080",
-    "http://127.0.0.1:5500",  # VS Code Live Server
-    "https://vector-space-explorer.vercel.app",
-]
+from config import PORT, CORS_ORIGINS
 
 
 @asynccontextmanager
@@ -31,7 +23,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=CORS_ORIGINS,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
