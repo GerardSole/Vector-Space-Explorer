@@ -86,21 +86,6 @@ npx serve .
 
 Open **http://localhost:8080**. Without a running Vercel Function, inserts fall back to a deterministic 6-value simulated vector — the 3D layout and all UI features still work.
 
-### Deployed on Vercel (with real embeddings)
-
-1. Push the repo to GitHub.
-2. Import it in [vercel.com](https://vercel.com) — zero config needed.
-3. Add the environment variable (see below).
-4. Deploy.
-
-## Environment variables
-
-| Variable | Where to set | Description |
-|---|---|---|
-| `COHERE_API_KEY` | Vercel → Project → Settings → Environment Variables | API key from [dashboard.cohere.com](https://dashboard.cohere.com). The serverless function `api/embed.js` reads it server-side; it is never sent to the browser. |
-
-The app degrades gracefully without the key: inserts log `⚠ Using simulated vector` and continue working with a placeholder embedding. No crash, no blank screen.
-
 ## Project structure
 
 ```
