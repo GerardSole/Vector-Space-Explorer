@@ -26,6 +26,7 @@ import {
   getSimulatedVector,
   getEmbedding,
   repositionWord,
+  makeVector3,
 } from "./words.js";
 import { pca, normalizeProjection } from "./pca.js";
 
@@ -123,14 +124,9 @@ const eduTextEl = document.getElementById("eduText");
 
 // ---------------------------------------------------------------- "tabla" en memoria
 //
-// Punto de partida: el dataset curado de words.js. INSERT/DELETE la
-// mutan en vivo, así SEARCH y el selector de DELETE siempre reflejan
-// lo que realmente hay en la escena 3D en este momento.
-let rows = WORD_DATA.map((entry) => ({
-  word: entry.word,
-  category: entry.cluster,
-  position: entry.position,
-}));
+// Arranca vacío; se rellena en initializeWordSpace() una vez que los
+// embeddings reales de Cohere están listos y PCA ha calculado posiciones.
+let rows = [];
 
 function refreshVectorCount() {
   vectorCountEl.textContent = `${rows.length} vectors`;
@@ -457,12 +453,7 @@ window.addEventListener("vse:word-selected", (event) => {
   window.dispatchEvent(new CustomEvent("vse:focus-word", { detail: entry }));
 });
 
-// ---------------------------------------------------------------- init
-
-refreshVectorCount();
-refreshDeleteOptions();
-refreshInsertPreview();
-logSuccess("READY", `${rows.length} vectores cargados`);
+// ---------------------------------------------------------------- inicio asíncrono: embeddings + PCA
 
 // ---------------------------------------------------------------- onboarding "¿Qué es esto?"
 //
@@ -557,4 +548,104 @@ function showOnboarding() {
   render();
 }
 
-showOnboarding();
+// ---------------------------------------------------------------- initializeWordSpace
+//
+// 1. Muestra overlay de carga (bloquea toda interacción hasta que PCA esté listo).
+// 2. Llama a getEmbedding() para cada palabra del dataset en paralelo.
+// 3. Corre PCA sobre los vectores reales (o simulados como fallback).
+// 4. Dispatch vse:words-ready → scene.js siembra la nube 3D.
+// 5. Inicializa rows + panel → fade-out overlay → muestra onboarding.
+
+(async function initializeWordSpace() {
+  // ── overlay de carga ─────────────────────────────────────────────
+  const overlay = document.createElement("div");
+  overlay.className = "loading-overlay";
+  overlay.innerHTML = `
+    <div class="loading-card">
+      <div class="loading-badge">VECTOR DB</div>
+      <p class="loading-title">Inicializando espacio vectorial…</p>
+      <div class="loading-bar-track">
+        <div class="loading-bar-fill" id="loadingBarFill"></div>
+      </div>
+      <p class="loading-status" id="loadingStatus">Conectando con Cohere (0 / ${WORD_DATA.length})…</p>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const barFill = document.getElementById("loadingBarFill");
+  const statusEl = document.getElementById("loadingStatus");
+  const total = WORD_DATA.length;
+  let done = 0;
+
+  function updateProgress() {
+    done++;
+    barFill.style.width = `${(done / total) * 100}%`;
+    statusEl.textContent = done < total
+      ? `Generando embeddings (${done} / ${total})…`
+      : "Calculando PCA…";
+  }
+
+  // ── embeddings en paralelo con fallback por palabra ───────────────
+  const results = await Promise.all(
+    WORD_DATA.map(async (entry) => {
+      let vector;
+      try {
+        vector = await getEmbedding(entry.word);
+      } catch {
+        vector = getSimulatedVector(entry.word);
+      }
+      updateProgress();
+      return { word: entry.word, category: entry.cluster, vector };
+    })
+  );
+
+  // ── PCA: normaliza dimensiones (1024 real vs 6 simulado) ──────────
+  const maxDim = Math.max(...results.map((r) => r.vector.length));
+  const vectors = results.map((r) =>
+    r.vector.length === maxDim
+      ? r.vector
+      : [...r.vector, ...new Array(maxDim - r.vector.length).fill(0)]
+  );
+  const coords = normalizeProjection(pca(vectors, 3), 7);
+
+  // ── placements: posición THREE.Vector3 + vector para userData ─────
+  const placements = results.map((r, i) => ({
+    word: r.word,
+    category: r.category,
+    vector: r.vector,
+    position: makeVector3(coords[i][0], coords[i][1], coords[i][2]),
+  }));
+
+  // ── inicializar rows con posiciones y vectores reales ─────────────
+  rows = placements.map((p) => ({
+    word: p.word,
+    category: p.category,
+    position: p.position,
+    vector: p.vector,
+  }));
+
+  // Pre-poblar mapa de alineación de signos para que el primer INSERT
+  // del usuario no cause un flip de espejo respecto al layout inicial.
+  placements.forEach((p, i) => {
+    prevPCAPositions.set(p.word, [coords[i][0], coords[i][1], coords[i][2]]);
+  });
+
+  // ── notificar a scene.js ──────────────────────────────────────────
+  window.dispatchEvent(new CustomEvent("vse:words-ready", { detail: { placements } }));
+
+  // ── refrescar panel izquierdo ─────────────────────────────────────
+  refreshVectorCount();
+  refreshDeleteOptions();
+  refreshInsertPreview();
+
+  const src = results[0].vector.length === 1024 ? "Cohere" : "simulados";
+  logSuccess("READY", `${rows.length} embeddings cargados (${src})`);
+
+  // ── fade out overlay → onboarding ────────────────────────────────
+  overlay.style.opacity = "0";
+  overlay.style.pointerEvents = "none";
+  setTimeout(() => {
+    overlay.remove();
+    showOnboarding();
+  }, 480);
+})();

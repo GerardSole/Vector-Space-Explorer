@@ -65,7 +65,8 @@ const light2 = new THREE.PointLight(0x06b6d4, 2.2, 60);
 scene.add(ambientLight, light1, light2);
 
 const particles = initParticles(scene);
-initWordDataset(scene); // siembra el dataset curado de 24 palabras (agrega wordGroup a la escena)
+// Las palabras entran cuando ui.js termina de obtener embeddings reales
+// de Cohere y recalcular PCA — ese módulo dispara vse:words-ready.
 
 // nebulosas de fondo, muy sutiles, una por zona/categoría — decorativas,
 // se crean una sola vez y no se animan (sin costo por frame). Viven en
@@ -405,6 +406,12 @@ window.addEventListener("vse:delete-fx", (event) => {
   const { position, color } = event.detail ?? {};
   if (position) spawnDeleteImplosion(wordGroup, position, color);
 });
+
+// ---------------------------------------------------------------- inicialización de palabras (diferida)
+
+window.addEventListener("vse:words-ready", ({ detail: { placements } }) => {
+  initWordDataset(scene, placements);
+}, { once: true });
 
 // ---------------------------------------------------------------- loop
 

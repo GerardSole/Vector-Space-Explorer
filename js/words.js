@@ -23,8 +23,6 @@
 
 import * as THREE from "three";
 
-export const DIMENSIONS = 3; // el "vector" de cada palabra es directamente su posición 3D
-
 // ---------------------------------------------------------------- categorías
 
 export const CATEGORY_COLORS = {
@@ -48,133 +46,70 @@ export const CLUSTERS = [
   { name: "person",  color: hexToNumber(CATEGORY_COLORS.person) },
 ];
 
-// ---------------------------------------------------------------- dataset curado por zonas
+// ---------------------------------------------------------------- dataset: palabras por categoría
 //
-// A diferencia de un dataset generado por embeddings + proyección
-// aleatoria, aquí la posición ES la información semántica: cada
-// categoría vive en una zona fija y reconocible del espacio 3D. Las
-// palabras dentro de cada zona se reparten en un pequeño círculo
-// determinista (no aleatorio) alrededor del punto de anclaje.
-//
-// Nota: la consigna pedía 25 palabras pero lista 24 (6+6+5+4+3) — se
-// implementan exactamente las 24 listadas.
-const ZONES = [
-  { category: "emotion", anchor: new THREE.Vector3(-6, 5, 0), words: ["amor", "alegría", "tristeza", "miedo", "nostalgia", "esperanza"] }, // zona -X, +Y
-  { category: "nature",  anchor: new THREE.Vector3(8, 0, 0),  words: ["océano", "bosque", "montaña", "lluvia", "sol", "tormenta"] },        // zona +X
-  { category: "animal",  anchor: new THREE.Vector3(0, -7, 0), words: ["perro", "gato", "lobo", "águila", "delfín"] },                        // zona -Y
-  { category: "object",  anchor: new THREE.Vector3(0, 0, 7),  words: ["libro", "música", "ciudad", "silencio"] },                            // zona +Z
-  // radio reducido: con solo 3 palabras, el radio default (1.6) las deja
-  // a ~2.8 entre sí — por encima del umbral de conexión (2.5) — y
-  // quedaban sin líneas internas, a diferencia de las demás zonas.
-  { category: "person",  anchor: new THREE.Vector3(5, 7, 0),  words: ["madre", "amigo", "héroe"], localRadius: 1.3 }, // zona +X, +Y
+// Las posiciones 3D ya NO están aquí — las genera PCA sobre los
+// embeddings reales de Cohere al arrancar la app (ui.js →
+// initializeWordSpace). Esta tabla solo define qué palabras hay y a
+// qué categoría pertenecen.
+
+const WORD_CATEGORIES = [
+  { category: "emotion", words: ["amor", "alegría", "tristeza", "miedo", "nostalgia", "esperanza"] },
+  { category: "nature",  words: ["océano", "bosque", "montaña", "lluvia", "sol", "tormenta"] },
+  { category: "animal",  words: ["perro", "gato", "lobo", "águila", "delfín"] },
+  { category: "object",  words: ["libro", "música", "ciudad", "silencio"] },
+  { category: "person",  words: ["madre", "amigo", "héroe"] },
 ];
 
-const ZONE_LOCAL_RADIUS = 1.6; // radio del pequeño círculo donde se reparten las palabras de una zona
-const MIN_WORD_SEPARATION = 1.6; // distancia mínima garantizada entre palabras de una misma zona
+let _wordId = 0;
+export const WORD_DATA = WORD_CATEGORIES.flatMap(({ category, words }) =>
+  words.map((word) => ({
+    id: _wordId++,
+    word,
+    cluster: category,
+    color: hexToNumber(CATEGORY_COLORS[category]),
+  }))
+);
 
-/** Posición determinista de la i-ésima palabra (de `total`) alrededor del anclaje de su zona. */
-function zonePosition(anchor, index, total, radius) {
-  const angle = (index / total) * Math.PI * 2;
-  return new THREE.Vector3(
-    anchor.x + Math.cos(angle) * radius,
-    anchor.y + Math.sin(angle * 1.3) * radius * 0.6,
-    anchor.z + Math.sin(angle) * radius
-  );
-}
+// Posiciones de referencia por categoría: usadas por las nebulosas de
+// fondo (scene.js, puramente estéticas) y como fallback de
+// getInsertPosition cuando una categoría no tiene palabras en escena.
+const ZONE_POSITIONS = {
+  emotion: new THREE.Vector3(-6,  5, 0),
+  nature:  new THREE.Vector3( 8,  0, 0),
+  animal:  new THREE.Vector3( 0, -7, 0),
+  object:  new THREE.Vector3( 0,  0, 7),
+  person:  new THREE.Vector3( 5,  7, 0),
+};
 
-/**
- * Empuja pares de puntos demasiado cercanos hasta una distancia mínima,
- * sin alterar a los que ya están suficientemente separados.
- */
-function relaxPositions(positions, minSeparation, iterations = 60) {
-  for (let iter = 0; iter < iterations; iter++) {
-    let moved = false;
-    for (let i = 0; i < positions.length; i++) {
-      for (let j = i + 1; j < positions.length; j++) {
-        const a = positions[i];
-        const b = positions[j];
-        const delta = b.clone().sub(a);
-        let dist = delta.length();
-        if (dist < 1e-6) {
-          delta.set(1, 0, 0);
-          dist = 1e-3;
-        }
-        if (dist < minSeparation) {
-          const push = (minSeparation - dist) / 2;
-          delta.multiplyScalar(1 / dist);
-          a.addScaledVector(delta, -push);
-          b.addScaledVector(delta, push);
-          moved = true;
-        }
-      }
-    }
-    if (!moved) break;
-  }
-}
-
-function buildDataset() {
-  const data = [];
-  let id = 0;
-
-  ZONES.forEach((zone) => {
-    const radius = zone.localRadius ?? ZONE_LOCAL_RADIUS;
-    const positions = zone.words.map((_, i) => zonePosition(zone.anchor, i, zone.words.length, radius));
-
-    // garantiza una separación mínima legible entre las palabras de
-    // esta misma zona (ver relaxPositions)
-    relaxPositions(positions, MIN_WORD_SEPARATION);
-
-    zone.words.forEach((word, i) => {
-      const position = positions[i];
-      data.push({
-        id: id++,
-        word,
-        cluster: zone.category, // = categoría (nombre conservado por compatibilidad con ui.js)
-        color: hexToNumber(CATEGORY_COLORS[zone.category]),
-        vector: [position.x, position.y, position.z], // el "embedding" es la posición misma
-        position,
-      });
-    });
-  });
-
-  return data;
-}
-
-export const WORD_DATA = buildDataset();
-
-const ZONE_ANCHOR_BY_CATEGORY = Object.fromEntries(ZONES.map((z) => [z.category, z.anchor]));
-const CUSTOM_INSERT_ANCHOR = new THREE.Vector3(0, 0, 0); // "custom" no tiene zona propia: centro de la formación
-
-/**
- * Posición y color de cada zona (sin "custom", que no tiene zona
- * propia). La usa scene.js para dibujar las nebulosas de fondo, muy
- * sutiles, detrás de cada categoría.
- */
-export const ZONE_ANCHORS = ZONES.map((zone) => ({
-  category: zone.category,
-  position: zone.anchor.clone(),
-  color: CATEGORY_COLORS[zone.category],
+export const ZONE_ANCHORS = Object.entries(ZONE_POSITIONS).map(([category, position]) => ({
+  category,
+  position: position.clone(),
+  color: CATEGORY_COLORS[category],
 }));
 
+const ZONE_ANCHOR_BY_CATEGORY = ZONE_POSITIONS;
+const CUSTOM_INSERT_ANCHOR = new THREE.Vector3(0, 0, 0);
+
 /**
- * Devuelve una posición razonable (con jitter aleatorio) para insertar
- * dinámicamente una palabra nueva de `category`, cerca de la zona que
- * le corresponde. La usa ui.js para la sección INSERT.
- * @param {string} category
- * @returns {THREE.Vector3}
+ * Crea un THREE.Vector3 desde coordenadas escalares.
+ * Permite que ui.js construya posiciones sin importar THREE directamente.
+ */
+export function makeVector3(x, y, z) {
+  return new THREE.Vector3(x, y, z);
+}
+
+/**
+ * Posición de inserción para una nueva palabra de `category`: centroide
+ * de las palabras de esa categoría en escena más jitter, o la posición
+ * de referencia de su zona si la categoría está vacía.
  */
 export function getInsertPosition(category) {
   const centroid = getCategoryCentroid(category);
-  const jitter = () => (Math.random() - 0.5) * 1.6; // ±0.8 unidades
+  const jitter = () => (Math.random() - 0.5) * 1.6;
   return new THREE.Vector3(centroid.x + jitter(), centroid.y + jitter(), centroid.z + jitter());
 }
 
-/**
- * Centroide de las palabras de `category` actualmente en escena (no del
- * dataset original: refleja inserts/deletes en vivo). Si la categoría
- * todavía no tiene ninguna palabra, cae al ancla de su zona (o al
- * centro de la formación, para "custom").
- */
 function getCategoryCentroid(category) {
   const inCategory = [...registry.values()].filter((entry) => entry.category === category);
   if (inCategory.length === 0) {
@@ -185,15 +120,6 @@ function getCategoryCentroid(category) {
     new THREE.Vector3()
   );
   return sum.divideScalar(inCategory.length);
-}
-
-/** Vecinos más cercanos por distancia 3D (no hay embedding separado: la posición es el vector). */
-export function nearestNeighbors(target, k = 4) {
-  return WORD_DATA
-    .filter((w) => w.id !== target.id)
-    .map((w) => ({ word: w, similarity: 1 / (1 + target.position.distanceTo(w.position)) }))
-    .sort((a, b) => b.similarity - a.similarity)
-    .slice(0, k);
 }
 
 // ---------------------------------------------------------------- vector "simulado" (educativo)
@@ -699,32 +625,19 @@ export function updateConnectionPulses(time) {
 }
 
 /**
- * Siembra el dataset curado (24 palabras) en la escena: agrega
- * wordGroup a `scene` y crea cada palabra con addWordToScene(). Pensada
- * para llamarse una sola vez al inicio, p. ej. justo después de
- * initParticles(scene) en scene.js.
- *
- * addWordToScene() solo conoce (word, position, category), pero aquí sí
- * tenemos la entrada completa del dataset (id, vector, cluster...) — se
- * la asignamos como userData para que el panel de detalle y los vecinos
- * más cercanos sigan funcionando cuando se selecciona desde la escena.
+ * Siembra el dataset inicial en la escena usando las posiciones
+ * calculadas por PCA sobre embeddings reales de Cohere.
+ * Llamada una sola vez desde scene.js al recibir vse:words-ready.
  *
  * @param {THREE.Scene} scene
+ * @param {Array<{word: string, category: string, position: THREE.Vector3, vector: number[]}>} placements
  */
-export function initWordDataset(scene) {
+export function initWordDataset(scene, placements) {
   scene.add(wordGroup);
-
-  WORD_DATA.forEach((entry) => {
-    const group = addWordToScene(entry.word, entry.position, entry.cluster);
-    // entry.cluster es el nombre histórico de este mismo dato (ver
-    // buildDataset): se agrega también como `category` porque es el
-    // nombre que usan addWordToScene/CATEGORY_COLORS y, ahora, el
-    // tooltip — así hit.userData.category funciona tanto para estas
-    // palabras del dataset curado como para las insertadas a mano.
-    const userData = { ...entry, category: entry.cluster };
+  placements.forEach(({ word, category, position, vector }) => {
+    const group = addWordToScene(word, position, category);
+    const userData = { word, category, cluster: category, position: position.clone(), vector };
     group.userData = userData;
-    group.children.forEach((child) => {
-      child.userData = userData;
-    });
+    group.children.forEach((child) => { child.userData = userData; });
   });
 }
