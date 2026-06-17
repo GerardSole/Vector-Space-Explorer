@@ -6,8 +6,10 @@ const API_URL =
     ? "http://localhost:8000"
     : "https://vector-space-explorer.onrender.com/"; // TODO: reemplaza con la URL real de Render
 
+const _BASE = API_URL.replace(/\/$/, ""); // elimina trailing slash si lo hay
+
 async function _request(path, options = {}) {
-  const res = await fetch(`${API_URL}${path}`, {
+  const res = await fetch(`${_BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
     ...options,
   });

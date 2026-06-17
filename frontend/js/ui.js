@@ -16,7 +16,6 @@
  */
 
 import {
-  WORD_DATA,
   CATEGORY_COLORS,
   addWordToScene,
   removeWordFromScene,
@@ -265,31 +264,24 @@ insertBtn.addEventListener("click", async () => {
   insertBtn.innerHTML = '<span class="terminal-btn__kw">INSERT INTO</span> Generando vector…';
   insertPreviewEl.textContent = "Generando vector…";
 
-  let vector;
-  let vectorPreview;
-  let dimensions;
-  let isSimulated = false;
-
+  let result;
   try {
-    const result = await insertWord(word, category);
-    vector = result.vector;
-    vectorPreview = result.vector_preview;
-    dimensions = result.dimensions;
-  } catch {
-    vector = getSimulatedVector(word);
-    vectorPreview = vector.slice(0, 6);
-    dimensions = vector.length;
-    isSimulated = true;
-  } finally {
+    result = await insertWord(word, category);
+  } catch (e) {
     insertBtn.disabled = false;
     insertBtn.innerHTML = '<span class="terminal-btn__kw">INSERT INTO</span> vectors';
+    insertPreviewEl.textContent = "[ ]";
+    logError("INSERT", `'${word}' → ${e.message}`);
+    return; // no añadir a escena si Qdrant no confirmó
   }
 
-  insertPreviewEl.textContent = `[${vectorPreview.map((v) => v.toFixed(2)).join(", ")}…]`;
+  insertBtn.disabled = false;
+  insertBtn.innerHTML = '<span class="terminal-btn__kw">INSERT INTO</span> vectors';
+  insertPreviewEl.textContent = `[${result.vector_preview.map((v) => v.toFixed(2)).join(", ")}…]`;
 
   const position = getInsertPosition(category);
   addWordToScene(word, position, category);
-  rows.push({ word, category, position, vector });
+  rows.push({ word, category, position, vector: result.vector });
 
   applyPCA(rows);
 
@@ -299,11 +291,7 @@ insertBtn.addEventListener("click", async () => {
 
   refreshVectorCount();
   refreshDeleteOptions();
-
-  if (isSimulated) {
-    log(`<span class="db-log__err">⚠</span> ${kw("EMBED")} → backend sin respuesta, usando vector simulado`);
-  }
-  logSuccess("INSERT", `'${word}' → vector[${dimensions}] from ${isSimulated ? "simulated" : "backend"}`);
+  logSuccess("INSERT", `'${word}' → vector[${result.dimensions}] guardado en Qdrant`);
   setEducation("insert");
 
   insertWordEl.value = "";
@@ -424,9 +412,21 @@ deleteBtn.addEventListener("click", async () => {
   const word = deleteWordEl.value;
   if (!word) { logError("DELETE", "→ no hay vectores para borrar"); return; }
 
-  const deletedRow = rows.find((row) => row.word === word);
+  deleteBtn.disabled = true;
 
-  // Actualiza UI de inmediato; la llamada a Qdrant va detrás
+  // Confirma en Qdrant ANTES de modificar la escena
+  try {
+    const res = await deleteWord(word);
+    if (!res.success) throw new Error("Qdrant no confirmó el borrado");
+  } catch (e) {
+    deleteBtn.disabled = false;
+    logError("DELETE", `'${word}' → ${e.message}`);
+    return;
+  }
+
+  deleteBtn.disabled = false;
+
+  const deletedRow = rows.find((row) => row.word === word);
   removeWordFromScene(word);
   rows = rows.filter((row) => row.word !== word);
   prevPCAPositions.delete(word);
@@ -443,15 +443,8 @@ deleteBtn.addEventListener("click", async () => {
 
   refreshVectorCount();
   refreshDeleteOptions();
-  logSuccess("DELETE", `'${word}' → vector removed`);
+  logSuccess("DELETE", `'${word}' → eliminado de Qdrant`);
   setEducation("delete");
-
-  // Elimina de Qdrant en segundo plano
-  try {
-    await deleteWord(word);
-  } catch (e) {
-    log(`<span class="db-log__err">⚠</span> ${kw("DELETE")} → Qdrant: ${e.message}`);
-  }
 });
 
 // ---------------------------------------------------------------- selección desde la escena 3D
@@ -588,77 +581,57 @@ function showOnboarding() {
   const barFill = document.getElementById("loadingBarFill");
   const statusEl = document.getElementById("loadingStatus");
 
-  let results;  // [{ word, category, vector }]
-  let src;
-
-  // ── 1. Intenta restaurar datos persistidos desde Qdrant ───────────
-  let existing = [];
+  // ── listVectors() es la ÚNICA fuente de verdad ───────────────────
+  // No hay fallback a WORD_DATA: el seed es responsabilidad del backend.
+  let existing;
   try {
     existing = await listVectors();
-  } catch {
-    // backend no disponible, continúa con semilla fresca
+    console.log(`Cargando ${existing.length} vectores desde Qdrant…`);
+  } catch (err) {
+    console.error("Error al conectar con el backend:", err);
+    statusEl.textContent = "⚠ No se pudo conectar con el backend";
+    barFill.style.background = "var(--accent, #f43f5e)";
+    barFill.style.width = "100%";
+    await new Promise((r) => setTimeout(r, 2500));
+    // Escena vacía pero funcional — el usuario puede reintentar
+    window.dispatchEvent(new CustomEvent("vse:words-ready", { detail: { placements: [] } }));
+    rows = [];
+    refreshVectorCount();
+    refreshDeleteOptions();
+    refreshInsertPreview();
+    overlay.style.opacity = "0";
+    overlay.style.pointerEvents = "none";
+    setTimeout(() => { overlay.remove(); showOnboarding(); }, 480);
+    return;
   }
+
+  statusEl.textContent =
+    existing.length > 0
+      ? `${existing.length} vectores recibidos, calculando PCA…`
+      : "Colección vacía — escena lista";
+  barFill.style.width = "70%";
+
+  // ── PCA sobre los vectores recibidos ─────────────────────────────
+  let placements = [];
+  let coords = [];
 
   if (existing.length > 0) {
-    // ── RESTORE: hay datos en Qdrant ─────────────────────────────
-    statusEl.textContent = `Restaurando ${existing.length} vectores de Qdrant…`;
-    barFill.style.width = "100%";
-
-    results = existing.map((e) => ({
+    const maxDim = Math.max(...existing.map((e) => e.vector.length));
+    const vectors = existing.map((e) =>
+      e.vector.length === maxDim
+        ? e.vector
+        : [...e.vector, ...new Array(maxDim - e.vector.length).fill(0)]
+    );
+    coords = normalizeProjection(pca(vectors, 3), 7);
+    placements = existing.map((e, i) => ({
       word: e.word,
       category: e.category,
-      vector: e.vector,   // vector completo devuelto por el backend
+      vector: e.vector,
+      position: makeVector3(coords[i][0], coords[i][1], coords[i][2]),
     }));
-    src = "Qdrant";
-
-  } else {
-    // ── SEED: Qdrant vacío — genera embeddings para las palabras iniciales
-    const total = WORD_DATA.length;
-    let done = 0;
-
-    function updateProgress() {
-      done++;
-      barFill.style.width = `${(done / total) * 100}%`;
-      statusEl.textContent = done < total
-        ? `Generando embeddings (${done} / ${total})…`
-        : "Calculando PCA…";
-    }
-
-    results = await Promise.all(
-      WORD_DATA.map(async (entry) => {
-        let vector;
-        try {
-          const res = await insertWord(entry.word, entry.cluster);
-          vector = res.vector;
-        } catch {
-          // fallback: vector simulado local si el backend no responde
-          vector = getSimulatedVector(entry.word);
-        }
-        updateProgress();
-        return { word: entry.word, category: entry.cluster, vector };
-      })
-    );
-    src = results[0].vector.length === 1024 ? "Cohere" : "simulados";
   }
 
-  statusEl.textContent = "Calculando PCA…";
-
-  // ── 2. PCA sobre los vectores (normaliza dims si hay mezcla) ──────
-  const maxDim = Math.max(...results.map((r) => r.vector.length));
-  const vectors = results.map((r) =>
-    r.vector.length === maxDim
-      ? r.vector
-      : [...r.vector, ...new Array(maxDim - r.vector.length).fill(0)]
-  );
-  const coords = normalizeProjection(pca(vectors, 3), 7);
-
-  // ── 3. Construye placements con posiciones 3D ─────────────────────
-  const placements = results.map((r, i) => ({
-    word: r.word,
-    category: r.category,
-    vector: r.vector,
-    position: makeVector3(coords[i][0], coords[i][1], coords[i][2]),
-  }));
+  barFill.style.width = "100%";
 
   rows = placements.map((p) => ({
     word: p.word,
@@ -667,21 +640,21 @@ function showOnboarding() {
     vector: p.vector,
   }));
 
-  // Pre-poblar mapa de alineación de signos
+  // Pre-poblar mapa de alineación de signos para INSERT futuros
   placements.forEach((p, i) => {
     prevPCAPositions.set(p.word, [coords[i][0], coords[i][1], coords[i][2]]);
   });
 
-  // ── 4. Notifica a scene.js para sembrar la nube 3D ────────────────
+  // ── Notifica a scene.js ───────────────────────────────────────────
   window.dispatchEvent(new CustomEvent("vse:words-ready", { detail: { placements } }));
 
   refreshVectorCount();
   refreshDeleteOptions();
   refreshInsertPreview();
 
-  logSuccess("READY", `${rows.length} vectores cargados desde ${src}`);
+  logSuccess("READY", `${rows.length} vectores cargados desde Qdrant`);
 
-  // ── 5. Fade out overlay → onboarding ─────────────────────────────
+  // ── Fade out overlay → onboarding ────────────────────────────────
   overlay.style.opacity = "0";
   overlay.style.pointerEvents = "none";
   setTimeout(() => {
